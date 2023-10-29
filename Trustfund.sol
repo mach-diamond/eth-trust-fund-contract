@@ -7,34 +7,23 @@ struct Transaction {
     uint netBalance;
 }
 
-contract TrustFund {
-    // State Variables
-    address public immutable owner;
-    address public immutable beneficiary;
-    
-    Transaction[] public transactions;
-    uint public fundAmount = 0; 
+struct TrustFund {
+    address beneficiary;
+    uint lastPayout;
+    uint fundAmount;
+    uint payoutInterval;
+    uint payoutAmount;
+	uint originalPayoutAmount;
+}
 
-    uint public lastPayout;
-    uint public payoutInterval; // in seconds
-	uint private originalPayoutAmount;
-    uint public payoutAmount; // in wei
-
+contract TrustFunds {
+	address public owner;
+    mapping(address => TrustFund) public trustFunds;
     event FundsAdded(uint256 amount, address sender);
-    event WithdrawMade(uint256 amount, uint remainingBalance);
+    event WithdrawMade(uint256 amount, uint remainingBalance, address beneficiary);
 
-    constructor(address _owner, address _beneficiary, uint _payoutAmount, uint _payoutInterval) payable {
-        require(msg.value > 0.5 ether, "You must have a minimum initial deposit of 0.5 ether");
-        fundAmount += msg.value;
-        owner = _owner;
-        beneficiary = _beneficiary;
-        payoutInterval = _payoutInterval;
-        payoutAmount = _payoutAmount;
-		originalPayoutAmount = _payoutAmount;
-		lastPayout = block.timestamp;
-
-        newTransaction(int256(msg.value));
-        emit FundsAdded(msg.value, msg.sender);
+    constructor() {
+		owner = msg.sender;
     }
 
     modifier isOwner() {
@@ -42,49 +31,51 @@ contract TrustFund {
         _;
     }
 
-    modifier isBeneficiary() {
-        require(msg.sender == beneficiary, "Not the Beneficiary");
-        _;
-    }
+	modifier trustFundExists(address _beneficiary) {
+		TrustFund storage trustFund = trustFunds[_beneficiary];
+		require(trustFund.beneficiary != address(0), "Trustfund with provided beneficiary does not exist");
+		_;
+	}
 
-    function withdraw() external isBeneficiary() {
-        require(block.timestamp >= lastPayout + payoutInterval, "Payout interval not reached");
-        require(fundAmount >= payoutAmount, "The contract does not have enough funds for payout");
+    function withdraw() external trustFundExists(msg.sender) {
+		TrustFund storage trustFund = trustFunds[msg.sender];
+        require(block.timestamp >= trustFund.lastPayout + trustFund.payoutInterval, "Payout interval not reached");
+        require(trustFund.fundAmount >= trustFund.payoutAmount, "The contract does not have enough funds for payout");
 
-        uint cyclesMissed = (block.timestamp - lastPayout) / payoutInterval;
-        uint amount = cyclesMissed * payoutAmount;
+        uint cyclesMissed = (block.timestamp - trustFund.lastPayout) / trustFund.payoutInterval;
+        uint amount = cyclesMissed * trustFund.payoutAmount;
 
         // Update state before transferring Ether
-        fundAmount -= amount;
-        lastPayout = block.timestamp;
-        newTransaction(int256(amount) * - 1);
+        trustFund.fundAmount -= amount;
+        trustFund.lastPayout = block.timestamp;
 
         // Transfer Ether
-        payable(beneficiary).transfer(amount);
+        payable(msg.sender).transfer(amount);
 
-        emit WithdrawMade(amount, fundAmount);
+        emit WithdrawMade(amount, trustFund.fundAmount, msg.sender);
     }
 
-    function deposit() external payable {
-        require(msg.value > 0, "Must add some amount of Ether");
-        fundAmount += msg.value;
+    function deposit(address beneficiary) external payable trustFundExists(beneficiary) {
+		TrustFund storage trustFund = trustFunds[beneficiary];
+        require(msg.value > 0.01 ether, "Must add some amount of Ether, minimum deposit is 0.01 ether");
+        trustFund.fundAmount += msg.value;
         emit FundsAdded(msg.value, msg.sender);
-        newTransaction(int256(msg.value));
     }
 
-	function updatePayAmount(uint newAmount) public {
-		uint fivePercent =  originalPayoutAmount / 20; // 5% of the current amount
-        uint lowerBound = originalPayoutAmount - fivePercent;
-        uint upperBound = originalPayoutAmount + fivePercent;
+	function createTrustFund(address beneficiary, uint payoutAmount, uint payoutInterval) public isOwner {
+        require(trustFunds[beneficiary].beneficiary == address(0), "Trust fund already exists for beneficiary");
+        trustFunds[beneficiary] = TrustFund(beneficiary, 0, 0, payoutInterval, payoutAmount, payoutAmount);
+    }
+
+	function updatePayAmount(address beneficiary, uint newAmount) public trustFundExists(beneficiary) {
+		TrustFund storage trustFund = trustFunds[beneficiary];
+		uint fivePercent =  trustFund.originalPayoutAmount / 20; // 5% of the current amount
+        uint lowerBound = trustFund.originalPayoutAmount - fivePercent;
+        uint upperBound = trustFund.originalPayoutAmount + fivePercent;
 
         require(newAmount >= lowerBound, "New amount is too low");
         require(newAmount <= upperBound, "New amount is too high");
 
-        payoutAmount = newAmount;
+        trustFund.payoutAmount = newAmount;
 	}
-
-    function newTransaction(int256 amount) internal {
-        Transaction memory newDeposit = Transaction(block.timestamp, amount, fundAmount);
-        transactions.push(newDeposit);
-    }
 }
